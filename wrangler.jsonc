@@ -1,0 +1,57 @@
+/**
+ * Read-only Wise MCP server.
+ * Free plan: Workers plus two SQLite Durable Objects (auth lockout and request quotas).
+ * No paid bindings (no Workers Rate Limiting, AI, Queues, or KV).
+ *
+ * WISE_API_TOKEN and MCP_AUTH_TOKEN are Worker secrets.
+ * Names are listed under secrets.required so types exist. Values are never committed.
+ */
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "wise-mcp",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-11-01",
+	"upload_source_maps": true,
+	"observability": {
+		"enabled": true,
+		"logs": {
+			"enabled": true,
+			"head_sampling_rate": 1
+		},
+		"traces": {
+			"enabled": true,
+			"head_sampling_rate": 0.01
+		}
+	},
+	"vars": {
+		"WISE_API_BASE": "https://api.wise.com",
+		"WISE_API_VERSION": "2026Q4",
+		"AUTH_FAILURE_LIMIT": "10",
+		"AUTH_FAILURE_WINDOW_SECONDS": "900",
+		"AUTH_LOCKOUT_SECONDS": "1800",
+		"RATE_LIMIT_PER_MINUTE": "60",
+		"RATE_LIMIT_GLOBAL_PER_MINUTE": "600",
+		"WISE_PER_SECOND": "5"
+	},
+	"secrets": {
+		"required": ["WISE_API_TOKEN", "MCP_AUTH_TOKEN"]
+	},
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "AUTH_RATE_LIMIT",
+				"class_name": "AuthRateLimit"
+			},
+			{
+				"name": "REQUEST_RATE_LIMIT",
+				"class_name": "RequestRateLimit"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["AuthRateLimit", "RequestRateLimit"]
+		}
+	]
+}

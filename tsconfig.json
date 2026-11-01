@@ -1,0 +1,18 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"lib": ["ES2022"],
+		"module": "ES2022",
+		"moduleResolution": "bundler",
+		"types": ["./worker-configuration.d.ts", "node"],
+		"strict": true,
+		"noEmit": true,
+		"skipLibCheck": true,
+		"isolatedModules": true,
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true
+	},
+	"include": ["worker-configuration.d.ts", "src/**/*.ts", "test/**/*.ts"]
+}

@@ -1,0 +1,22 @@
+# Copy to .dev.vars for local `npm run dev`. Never commit .dev.vars.
+# Wise personal API token from Wise > Settings > API tokens.
+WISE_API_TOKEN=
+# Bearer token required on every POST /mcp request.
+MCP_AUTH_TOKEN=
+
+# Optional. Defaults are the production host and the current quarterly API.
+# Point the host at the sandbox without changing the version:
+# WISE_API_BASE=https://api.wise-sandbox.com
+# WISE_API_VERSION=2026Q4
+
+# Optional lockout overrides. Wrangler vars are the defaults:
+# 10 failures / 900 seconds, then an 1800 second lockout.
+# AUTH_FAILURE_LIMIT=10
+# AUTH_FAILURE_WINDOW_SECONDS=900
+# AUTH_LOCKOUT_SECONDS=1800
+
+# Optional request quotas. Defaults: 60/minute per bearer, 600/minute global,
+# 5 Wise GETs/second. A Wise HTTP 429 pauses that outbound bucket for Retry-After.
+# RATE_LIMIT_PER_MINUTE=60
+# RATE_LIMIT_GLOBAL_PER_MINUTE=600
+# WISE_PER_SECOND=5
