@@ -3,17 +3,26 @@ import { DEFAULT_WISE_API_BASE, DEFAULT_WISE_API_VERSION, WISE_PRODUCTION_ORIGIN
 const VERSION = /^\d{4}Q[1-4]$/;
 const ALLOWED_ORIGINS = new Set([WISE_PRODUCTION_ORIGIN, WISE_SANDBOX_ORIGIN]);
 
+declare global {
+	interface Env {
+		/** Optional. Unencrypted PKCS#8 RSA PEM. Absent unless the secret is set. */
+		WISE_SCA_PRIVATE_KEY?: string;
+	}
+}
+
 export interface Config {
 	apiToken: string;
 	baseUrl: string;
 	apiVersion: string;
 	configError: string | null;
+	scaPrivateKey: string | null;
 }
 
 export interface CredentialEnv {
 	WISE_API_TOKEN?: string;
 	WISE_API_BASE?: string;
 	WISE_API_VERSION?: string;
+	WISE_SCA_PRIVATE_KEY?: string;
 }
 
 export function loadConfig(env: CredentialEnv): Config {
@@ -25,7 +34,13 @@ export function loadConfig(env: CredentialEnv): Config {
 		baseUrl: base.baseUrl,
 		apiVersion: version.apiVersion,
 		configError,
+		scaPrivateKey: optionalSecret(env.WISE_SCA_PRIVATE_KEY),
 	};
+}
+
+function optionalSecret(value: string | undefined): string | null {
+	const raw = (value ?? "").trim();
+	return raw.length === 0 ? null : raw;
 }
 
 export function hasCredentials(config: Config): boolean {

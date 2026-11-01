@@ -2,9 +2,10 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAuthLockoutCache } from "../src/auth-gate.js";
-import { SCA_MESSAGE } from "../src/client.js";
+import { SCA_NOT_CONFIGURED_MESSAGE, SCA_REJECTED_MESSAGE } from "../src/sca.js";
 import { handleRequest } from "../src/http.js";
 import { invocationSensitiveFetch, jsonRpc, MCP_TOKEN, mcpRequest, testEnv, toolText, WISE_TOKEN, type FetchCall } from "./helpers.js";
+import { rsaPkcs8Pem, signatureVerifies } from "./sca-key.js";
 
 const READ_TOOLS = [
 	"wise_status",
@@ -34,6 +35,10 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
 });
+
+function fakePem(label: string): string {
+	return `-----BEGIN ${label}-----\nMIIB\n-----END ${label}-----`;
+}
 
 function sourceFiles(dir: string): string[] {
 	const files: string[] = [];
@@ -175,10 +180,12 @@ describe("read-only tool registry", () => {
 
 	it("returns a clear SCA error and does not log the challenge or the token", async () => {
 		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-		const ott = "one-time-token-value-should-stay-private";
+		const ott = "be2f6579-9426-480b-9cb7-d8f1116cc8b9";
+		let calls = 0;
 		vi.stubGlobal(
 			"fetch",
 			invocationSensitiveFetch(async () => {
+				calls += 1;
 				return new Response(
 					JSON.stringify({
 						message: "This request requires Strong Customer Authentication.",
@@ -202,7 +209,10 @@ describe("read-only tool registry", () => {
 			}),
 		);
 		const text = toolText(response);
-		expect(text).toBe(SCA_MESSAGE);
+		expect(text).toBe(SCA_NOT_CONFIGURED_MESSAGE);
+		expect(text).toContain("WISE_SCA_PRIVATE_KEY");
+		expect(text).toContain("BEGIN PRIVATE KEY");
+		expect(calls).toBe(1);
 		expect(text).not.toContain(ott);
 		expect(text).not.toContain(WISE_TOKEN);
 		expect(text).not.toContain("Private Person");
@@ -314,5 +324,140 @@ describe("read-only tool registry", () => {
 		expect(transferUrl.searchParams.get("profile")).toBe("15");
 		expect(transferUrl.searchParams.get("status")).toBe("outgoing_payment_sent");
 		expect(transferUrl.searchParams.get("limit")).toBe("10");
+	});
+
+	it("signs an SCA challenge once and retries the same GET", async () => {
+		const keys = rsaPkcs8Pem();
+		const ott = "be2f6579-9426-480b-9cb7-d8f1116cc8b9";
+		const seen: { url: string; method: string; approval: string | null; signature: string | null }[] = [];
+		vi.stubGlobal(
+			"fetch",
+			invocationSensitiveFetch(async (input, init) => {
+				const headers = new Headers(init?.headers);
+				seen.push({
+					url: String(input),
+					method: init?.method ?? "GET",
+					approval: headers.get("x-2fa-approval"),
+					signature: headers.get("x-signature"),
+				});
+				if (seen.length === 1) {
+					return new Response(JSON.stringify({ message: "strong customer authentication", accountHolder: "Private Person" }), {
+						status: 403,
+						headers: { "x-2fa-approval": ott, "x-2fa-approval-result": "REJECTED" },
+					});
+				}
+				return Response.json({
+					query: { currency: "EUR", intervalStart: "2026-01-01T00:00:00Z", intervalEnd: "2026-02-01T00:00:00Z" },
+					transactions: [],
+				});
+			}),
+		);
+		const env = testEnv({ WISE_SCA_PRIVATE_KEY: keys.privatePem });
+		const response = await callMcp(
+			jsonRpc("tools/call", 12, {
+				name: "wise_get_balance_statement",
+				arguments: {
+					profileId: "7",
+					balanceId: "8",
+					currency: "EUR",
+					intervalStart: "2026-01-01T00:00:00Z",
+					intervalEnd: "2026-02-01T00:00:00Z",
+				},
+			}),
+			env,
+		);
+		const text = toolText(response);
+		expect(text).toContain('"transactions": []');
+		expect(text).not.toContain(ott);
+		expect(text).not.toContain("BEGIN PRIVATE KEY");
+		expect(text).not.toContain("Private Person");
+		expect(seen).toHaveLength(2);
+		expect(seen[0]?.method).toBe("GET");
+		expect(seen[1]?.method).toBe("GET");
+		expect(seen[0]?.url).toBe(seen[1]?.url);
+		expect(seen[0]?.approval).toBeNull();
+		expect(seen[0]?.signature).toBeNull();
+		expect(seen[1]?.approval).toBe(ott);
+		expect(seen[1]?.signature).toBeTruthy();
+		expect(signatureVerifies(keys.publicPem, ott, seen[1]?.signature ?? "")).toBe(true);
+
+		const status = await callMcp(jsonRpc("tools/call", 13, { name: "wise_status", arguments: {} }), env);
+		expect(toolText(status)).toContain('"scaSigningConfigured": true');
+		expect(toolText(status)).not.toContain("BEGIN PRIVATE KEY");
+	});
+
+	it("does not retry when the signed challenge is rejected", async () => {
+		const keys = rsaPkcs8Pem();
+		const ott = "be2f6579-9426-480b-9cb7-d8f1116cc8b9";
+		let calls = 0;
+		vi.stubGlobal(
+			"fetch",
+			invocationSensitiveFetch(async () => {
+				calls += 1;
+				return new Response("{}", { status: 403, headers: { "x-2fa-approval": ott } });
+			}),
+		);
+		const response = await callMcp(
+			jsonRpc("tools/call", 14, { name: "wise_get_transfer", arguments: { transferId: "1564145034" } }),
+			testEnv({ WISE_SCA_PRIVATE_KEY: keys.privatePem }),
+		);
+		expect(calls).toBe(2);
+		expect(toolText(response)).toBe(SCA_REJECTED_MESSAGE);
+		expect(toolText(response)).not.toContain(ott);
+		expect(toolText(response)).not.toContain("BEGIN PRIVATE KEY");
+	});
+
+	it("does not sign a 403 that is not an SCA challenge", async () => {
+		const keys = rsaPkcs8Pem();
+		let calls = 0;
+		vi.stubGlobal(
+			"fetch",
+			invocationSensitiveFetch(async () => {
+				calls += 1;
+				return Response.json({ error: "forbidden" }, { status: 403 });
+			}),
+		);
+		const response = await callMcp(
+			jsonRpc("tools/call", 15, { name: "wise_get_transfer", arguments: { transferId: "1564145034" } }),
+			testEnv({ WISE_SCA_PRIVATE_KEY: keys.privatePem }),
+		);
+		expect(calls).toBe(1);
+		expect(toolText(response)).toContain("HTTP 403");
+		expect(toolText(response)).not.toContain("x-2fa-approval");
+	});
+
+	it("does not call Wise again when the SCA key is not PKCS#8", async () => {
+		let calls = 0;
+		vi.stubGlobal(
+			"fetch",
+			invocationSensitiveFetch(async () => {
+				calls += 1;
+				return new Response("{}", {
+					status: 403,
+					headers: { "x-2fa-approval": "be2f6579-9426-480b-9cb7-d8f1116cc8b9" },
+				});
+			}),
+		);
+		const response = await callMcp(
+			jsonRpc("tools/call", 16, { name: "wise_get_transfer", arguments: { transferId: "1564145034" } }),
+			testEnv({ WISE_SCA_PRIVATE_KEY: fakePem("RSA PRIVATE KEY") }),
+		);
+		expect(calls).toBe(1);
+		expect(toolText(response)).toContain("PKCS#1");
+		expect(toolText(response)).not.toContain("MIIB");
+		const status = await callMcp(
+			jsonRpc("tools/call", 17, { name: "wise_status", arguments: {} }),
+			testEnv({ WISE_SCA_PRIVATE_KEY: fakePem("RSA PRIVATE KEY") }),
+		);
+		expect(toolText(status)).toContain('"scaSigningConfigured": false');
+		expect(toolText(status)).toContain("PKCS#1");
+		expect(toolText(status)).not.toContain("MIIB");
+	});
+
+	it("reports SCA signing as not configured", async () => {
+		const response = await callMcp(jsonRpc("tools/call", 18, { name: "wise_status", arguments: {} }));
+		expect(toolText(response)).toContain('"scaSigningConfigured": false');
+		expect(toolText(response)).toContain('"scaConfigError": null');
+		expect(toolText(response)).not.toContain(WISE_TOKEN);
 	});
 });

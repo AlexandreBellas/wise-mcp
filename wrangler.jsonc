@@ -3,8 +3,9 @@
  * Free plan: Workers plus two SQLite Durable Objects (auth lockout and request quotas).
  * No paid bindings (no Workers Rate Limiting, AI, Queues, or KV).
  *
- * WISE_API_TOKEN and MCP_AUTH_TOKEN are Worker secrets.
- * Names are listed under secrets.required so types exist. Values are never committed.
+ * WISE_API_TOKEN and MCP_AUTH_TOKEN are required Worker secrets.
+ * WISE_SCA_PRIVATE_KEY is optional. When set, a 403 SCA challenge is signed and the same GET is retried once.
+ * Required names are listed under secrets.required so types exist. Values are never committed.
  */
 {
 	"$schema": "./node_modules/wrangler/config-schema.json",
