@@ -3,12 +3,21 @@ import { MAX_ERROR_BODY_BYTES, MAX_RESPONSE_BYTES, SERVER_NAME, SERVER_VERSION }
 import { httpFetch } from "./http-fetch.js";
 import { assertSafePath } from "./paths.js";
 import type { OutboundBudget } from "./request-gate.js";
+import {
+	SCA_KEY_INVALID_MESSAGE,
+	SCA_NOT_CONFIGURED_MESSAGE,
+	SCA_NO_TOKEN_MESSAGE,
+	SCA_REJECTED_MESSAGE,
+	SCA_TOKEN_UNUSABLE_MESSAGE,
+	ScaConfigError,
+	signScaToken,
+} from "./sca.js";
 
 const QUERY_KEY = /^[A-Za-z][A-Za-z0-9]{0,32}$/;
+const OTT = /^[A-Za-z0-9._~+/=-]{8,512}$/;
 const USER_AGENT = `${SERVER_NAME}/${SERVER_VERSION}`;
 
-export const SCA_MESSAGE =
-	"Wise requires Strong Customer Authentication (SCA) for this read. A personal API token cannot complete the x-2fa-approval challenge from this server. Wise returned HTTP 403. Open the statement in the Wise app or website, or use a client that can sign the one-time token. This server does not retry the challenge and does not return the one-time token.";
+type ScaProof = { token: string; signature: string };
 
 export class WiseApiError extends Error {
 	readonly status: number;
@@ -61,10 +70,35 @@ export class WiseClient {
 		if (this.config.apiToken.length > 0 && url.includes(this.config.apiToken)) {
 			throw new Error("Refusing to put the Wise API token in a URL.");
 		}
+		const first = await this.send(url);
+		const token = oneTimeToken(first);
+		if (token === undefined) return this.handleResponse<T>(first, []);
+		await drain(first);
+		if (token === null) {
+			console.error(JSON.stringify({ message: "Wise SCA challenge", status: 403 }));
+			throw new WiseApiError(SCA_TOKEN_UNUSABLE_MESSAGE, 403, true);
+		}
+		const signature = await this.signChallenge(token);
+		const second = await this.send(url, { token, signature });
+		return this.handleResponse<T>(second, [token, signature], true);
+	}
+
+	private async send(url: string, sca?: ScaProof): Promise<Response> {
 		await this.budget?.acquire("api");
-		const res = await getOnly(url, this.config.apiToken);
+		const res = await getOnly(url, this.config.apiToken, sca);
 		await this.budget?.observe("api", res);
-		return this.handleResponse<T>(res);
+		return res;
+	}
+
+	private async signChallenge(token: string): Promise<string> {
+		try {
+			return await signScaToken(this.config.scaPrivateKey, token);
+		} catch (error) {
+			const missing = error instanceof ScaConfigError && !error.keyPresent;
+			console.error(JSON.stringify({ message: missing ? "Wise SCA challenge" : "Wise SCA key cannot sign", status: 403 }));
+			if (error instanceof ScaConfigError) throw new WiseApiError(error.message, 403, true);
+			throw new WiseApiError(SCA_KEY_INVALID_MESSAGE, 403, true);
+		}
 	}
 
 	private buildUrl(path: string, params?: Record<string, string | undefined>): string {
@@ -88,21 +122,22 @@ export class WiseClient {
 		return url.toString();
 	}
 
-	private async handleResponse<T>(res: Response): Promise<T> {
+	private async handleResponse<T>(res: Response, extraSecrets: string[], signedRetry = false): Promise<T> {
 		if (res.status >= 300 && res.status < 400) {
 			await cancelBody(res);
 			throw new WiseApiError(`Wise API error (HTTP ${res.status}).`, res.status);
 		}
-		const sca = res.status === 403 && (hasScaHeader(res.headers) || false);
+		const sca = res.status === 403 && hasScaHeader(res.headers);
 		const limit = res.ok ? MAX_RESPONSE_BYTES : MAX_ERROR_BODY_BYTES;
 		const body = await readBody(res, limit);
 		if (res.status === 403 && (sca || bodySaysSca(body.text))) {
-			console.error(JSON.stringify({ message: "Wise SCA challenge", status: 403 }));
-			throw new WiseApiError(SCA_MESSAGE, 403, true);
+			console.error(JSON.stringify({ message: signedRetry ? "Wise SCA signature rejected" : "Wise SCA challenge", status: 403 }));
+			if (signedRetry) throw new WiseApiError(SCA_REJECTED_MESSAGE, 403, true);
+			throw new WiseApiError(this.config.scaPrivateKey === null ? SCA_NOT_CONFIGURED_MESSAGE : SCA_NO_TOKEN_MESSAGE, 403, true);
 		}
 		if (!res.ok) {
 			const retryAfter = res.status === 429 ? retryAfterSeconds(res.headers.get("retry-after")) : null;
-			const detail = body.truncated ? undefined : publicDetail(body.text, [this.config.apiToken]);
+			const detail = body.truncated ? undefined : publicDetail(body.text, this.secretValues(extraSecrets));
 			console.error(
 				JSON.stringify({
 					message: "Wise API request failed",
@@ -122,6 +157,22 @@ export class WiseClient {
 			throw new WiseApiError("Wise returned a response that was not JSON.", res.status);
 		}
 	}
+
+	private secretValues(extra: string[]): string[] {
+		return [this.config.apiToken, this.config.scaPrivateKey ?? "", ...extra].filter((value) => value.length > 0);
+	}
+}
+
+/**
+ * A usable one-time token, null when the header is present but unsafe to resend,
+ * or undefined when this 403 is not an x-2fa-approval challenge.
+ */
+function oneTimeToken(res: Response): string | null | undefined {
+	if (res.status !== 403) return undefined;
+	const raw = res.headers.get("x-2fa-approval");
+	if (raw === null || raw.trim() === "") return undefined;
+	const token = raw.trim();
+	return OTT.test(token) ? token : null;
 }
 
 export function hasScaHeader(headers: Headers): boolean {
@@ -224,15 +275,24 @@ async function cancelBody(res: Response): Promise<void> {
 	await res.body?.cancel().catch(() => undefined);
 }
 
-/** GET only. A non-GET method never leaves this server. */
-function getOnly(url: string, token: string): Promise<Response> {
+async function drain(res: Response): Promise<void> {
+	await readBody(res, MAX_ERROR_BODY_BYTES);
+}
+
+/** GET only. A non-GET method never leaves this server. The SCA retry is the same GET plus two headers. */
+function getOnly(url: string, token: string, sca?: ScaProof): Promise<Response> {
+	const headers: Record<string, string> = {
+		Accept: "application/json",
+		Authorization: `Bearer ${token}`,
+		"User-Agent": USER_AGENT,
+	};
+	if (sca !== undefined) {
+		headers["x-2fa-approval"] = sca.token;
+		headers["X-Signature"] = sca.signature;
+	}
 	return httpFetch(url, {
 		method: "GET",
-		headers: {
-			Accept: "application/json",
-			Authorization: `Bearer ${token}`,
-			"User-Agent": USER_AGENT,
-		},
+		headers,
 		redirect: "manual",
 		cache: "no-store",
 	});

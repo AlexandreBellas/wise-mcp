@@ -3,6 +3,9 @@
 WISE_API_TOKEN=
 # Bearer token required on every POST /mcp request.
 MCP_AUTH_TOKEN=
+# Optional SCA signing key. Unencrypted PKCS#8 PEM (-----BEGIN PRIVATE KEY-----).
+# Paste the file contents here, or leave this unset. Never commit a real key.
+# WISE_SCA_PRIVATE_KEY=
 
 # Optional. Defaults are the production host and the current quarterly API.
 # Point the host at the sandbox without changing the version:

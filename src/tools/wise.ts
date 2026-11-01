@@ -120,7 +120,7 @@ export function registerWiseTools(server: McpServer, client: WiseClient, config:
 		"wise_get_balance_statement",
 		{
 			description:
-				"Balance statement for one balance and a UTC date range (max 469 days). Returns normalized transactions for Firefly: id, date, amount, currency, direction, counterparty, description, fees, running balance. UK/EEA profiles need Strong Customer Authentication. A personal token then gets a clear SCA error instead of the statement. COMPACT puts fees on the transaction. FLAT puts fees on their own line.",
+				"Balance statement for one balance and a UTC date range (max 469 days). Returns normalized transactions for Firefly: id, date, amount, currency, direction, counterparty, description, fees, running balance. UK/EEA profiles need Strong Customer Authentication. When WISE_SCA_PRIVATE_KEY is set, the server signs the x-2fa-approval challenge and retries this GET once. When it is not set, the tool returns a clear SCA error. COMPACT puts fees on the transaction. FLAT puts fees on their own line.",
 			inputSchema: {
 				profileId: z.string().describe("Wise profile id"),
 				balanceId: z.string().describe("Balance id"),
@@ -170,7 +170,7 @@ export function registerWiseTools(server: McpServer, client: WiseClient, config:
 		"wise_list_activities",
 		{
 			description:
-				"Activity feed for a profile. Use this when the balance statement returns an SCA error. Amounts are taken only when Wise sends a display string like \"150 JPY\". Running balance and fees are not on this feed. Pass cursor back as nextCursor. size is 1 to 100 (default 100).",
+				"Activity feed for a profile. Parses primaryAmount and secondaryAmount, including thousands separators, signs, Wise tags, and a second currency in the same display string. Raw display strings are kept. Do not book a figure when struck or secondaryStruck is true, or the activity when negated is true. Running balance and fees are not on this feed. Pass cursor back as nextCursor. size is 1 to 100 (default 100).",
 			inputSchema: {
 				profileId: z.string().describe("Wise profile id"),
 				since: z.string().optional().describe("Include activities after this UTC ISO-8601 time"),
@@ -245,7 +245,8 @@ export function registerWiseTools(server: McpServer, client: WiseClient, config:
 	server.registerTool(
 		"wise_get_transfer",
 		{
-			description: "Get one outgoing transfer by id. Same normalized shape as wise_list_transfers.",
+			description:
+				"Get one outgoing transfer by id. Same normalized shape as wise_list_transfers. A personal token may need SCA. When WISE_SCA_PRIVATE_KEY is set, the server signs the challenge and retries this GET once.",
 			inputSchema: { transferId: z.string().describe("Transfer id") },
 			annotations: READ_ONLY,
 		},

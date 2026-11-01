@@ -1,3 +1,5 @@
+import { inspectMarkup, parseActivityAmounts, type AmountSign } from "./display-amount.js";
+
 export type Money = { amount: string; currency: string };
 
 export type NormalizedTransaction = {
@@ -13,6 +15,19 @@ export type NormalizedTransaction = {
 	type: string | null;
 	reference: string | null;
 	status: string | null;
+};
+
+export type NormalizedActivity = NormalizedTransaction & {
+	sign: AmountSign | null;
+	secondaryAmount: string | null;
+	secondaryCurrency: string | null;
+	secondarySign: AmountSign | null;
+	secondaryDirection: "in" | "out" | null;
+	primaryAmountDisplay: string | null;
+	secondaryAmountDisplay: string | null;
+	struck: boolean;
+	secondaryStruck: boolean;
+	negated: boolean;
 };
 
 export type NormalizedProfile = {
@@ -154,7 +169,7 @@ export function normalizeStatement(payload: unknown): {
 	};
 }
 
-export function normalizeActivities(payload: unknown): { cursor: string | null; transactions: NormalizedTransaction[] } {
+export function normalizeActivities(payload: unknown): { cursor: string | null; transactions: NormalizedActivity[] } {
 	const record = asRecord(payload);
 	const activities = Array.isArray(record?.activities) ? record.activities : [];
 	return {
@@ -237,19 +252,31 @@ function normalizeStatementTransaction(payload: unknown): NormalizedTransaction 
 	};
 }
 
-function normalizeActivity(payload: unknown): NormalizedTransaction {
+function normalizeActivity(payload: unknown): NormalizedActivity {
 	const record = asRecord(payload);
-	const title = text(record?.title) ?? "";
-	const direction = title.includes("<negative>") ? "out" : title.includes("<positive>") ? "in" : null;
-	const description = [stripTags(title), text(record?.description)].filter((part): part is string => part !== null && part !== "").join(" — ");
-	const primary = parseDisplayAmount(record?.primaryAmount);
+	const title = inspectMarkup(text(record?.title) ?? "");
+	const description = [title.plain, text(record?.description)].filter((part): part is string => part !== null && part !== "").join(" — ");
+	const primaryAmountDisplay = text(record?.primaryAmount);
+	const secondaryAmountDisplay = text(record?.secondaryAmount);
+	const amounts = parseActivityAmounts(primaryAmountDisplay, secondaryAmountDisplay);
+	const secondary = amounts.secondary;
 	const resource = asRecord(record?.resource);
 	return {
 		id: text(record?.id),
 		date: text(record?.createdOn),
-		amount: primary?.amount ?? null,
-		currency: primary?.currency ?? null,
-		direction,
+		amount: amounts.primary.amount,
+		currency: amounts.primary.currency,
+		sign: amounts.primary.sign,
+		direction: title.direction ?? amounts.primary.direction,
+		secondaryAmount: secondary?.amount ?? null,
+		secondaryCurrency: secondary?.currency ?? null,
+		secondarySign: secondary?.sign ?? null,
+		secondaryDirection: secondary?.direction ?? null,
+		primaryAmountDisplay,
+		secondaryAmountDisplay,
+		struck: amounts.primary.struck,
+		secondaryStruck: secondary?.struck ?? false,
+		negated: title.negated,
 		counterparty: null,
 		description: description.length > 0 ? description : null,
 		fees: null,
@@ -313,16 +340,6 @@ function identificationDetails(payload: unknown): NormalizedAccountDetail["detai
 	return details;
 }
 
-function parseDisplayAmount(value: unknown): Money | null {
-	if (typeof value !== "string") return null;
-	const match = /^(-?\d+(?:\.\d+)?)\s+([A-Z]{3})$/.exec(value.trim());
-	if (!match) return null;
-	const amount = absoluteDecimal(match[1]);
-	const currency = currencyCode(match[2]);
-	if (amount === null || currency === null) return null;
-	return { amount, currency };
-}
-
 function directionFromType(value: unknown): "in" | "out" | null {
 	if (value === "CREDIT") return "in";
 	if (value === "DEBIT") return "out";
@@ -332,11 +349,6 @@ function directionFromType(value: unknown): "in" | "out" | null {
 function directionFromSign(signed: string | null): "in" | "out" | null {
 	if (signed === null || signed === "0") return null;
 	return signed.startsWith("-") ? "out" : "in";
-}
-
-function stripTags(value: string): string | null {
-	const stripped = value.replace(/<[^>]*>/g, "").trim();
-	return stripped.length > 0 ? stripped : null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

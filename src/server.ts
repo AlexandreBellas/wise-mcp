@@ -3,6 +3,7 @@ import { WiseClient } from "./client.js";
 import { SERVER_NAME, SERVER_VERSION } from "./constants.js";
 import { hasCredentials, loadConfig, type CredentialEnv } from "./config.js";
 import { outboundBudget, type QuotaEnv } from "./request-gate.js";
+import { scaStatus } from "./sca.js";
 import { READ_ONLY, ok } from "./tools/result.js";
 import { registerWiseTools } from "./tools/wise.js";
 
@@ -15,20 +16,24 @@ export function createWiseServer(env: CredentialEnv & QuotaEnv): McpServer {
 		"wise_status",
 		{
 			description:
-				"Show whether this read-only Wise MCP server has an API token and a valid API host. Does not reveal the token or any balance.",
+				"Show whether this read-only Wise MCP server has an API token, a valid API host, and an SCA signing key. Does not reveal the token, the key, or any balance.",
 			inputSchema: {},
 			annotations: READ_ONLY,
 		},
-		async () =>
-			ok({
+		async () => {
+			const sca = await scaStatus(config.scaPrivateKey);
+			return ok({
 				service: SERVER_NAME,
 				version: SERVER_VERSION,
 				mode: "read-only",
 				wiseCredentialsConfigured: hasCredentials(config),
+				scaSigningConfigured: sca.scaSigningConfigured,
+				scaConfigError: sca.scaConfigError,
 				wiseApiBase: config.baseUrl || null,
 				wiseApiVersion: config.apiVersion || null,
 				configError: config.configError,
-			}),
+			});
+		},
 	);
 
 	registerWiseTools(server, client, config);

@@ -72,6 +72,10 @@ web_modules/
 .dev.vars
 !.dev.vars.example
 
+# SCA key material. Never commit a Wise private or public key.
+*.pem
+*.key
+
 # Wrangler local state and generated runtime types
 .wrangler/
 worker-configuration.d.ts
